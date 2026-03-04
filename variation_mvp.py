@@ -2,12 +2,13 @@ from pathlib import Path
 import random
 from pydub import AudioSegment
 
-INPUT = Path("input/source.wav")
+INPUT_DIR = Path("input")
 OUTPUT_DIR = Path("output")
 
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 NUM_VARIATIONS = 10
+
 
 def change_speed(sound, speed=1.0):
     sound_with_altered_frame_rate = sound._spawn(
@@ -16,26 +17,35 @@ def change_speed(sound, speed=1.0):
     )
     return sound_with_altered_frame_rate.set_frame_rate(sound.frame_rate)
 
-sound = AudioSegment.from_file(INPUT)
 
-for i in range(NUM_VARIATIONS):
+wav_files = list(INPUT_DIR.glob("*.wav"))
 
-    new_sound = sound
+for wav_file in wav_files:
 
-    speed = random.uniform(0.97, 1.03)
-    new_sound = change_speed(new_sound, speed)
+    print("Processing:", wav_file)
 
-    pitch = random.uniform(-30, 30)
-    new_sound = new_sound._spawn(
-        new_sound.raw_data,
-        overrides={"frame_rate": int(new_sound.frame_rate * (2.0 ** (pitch / 1200.0)))}
-    ).set_frame_rate(sound.frame_rate)
+    sound = AudioSegment.from_file(wav_file)
 
-    gain = random.uniform(-2, 2)
-    new_sound = new_sound.apply_gain(gain)
+    for i in range(NUM_VARIATIONS):
 
-    output_file = OUTPUT_DIR / f"variation_{i}.wav"
+        new_sound = sound
 
-    new_sound.export(output_file, format="wav")
+        speed = random.uniform(0.97, 1.03)
+        new_sound = change_speed(new_sound, speed)
 
-    print("Saved:", output_file)
+        pitch = random.uniform(-30, 30)
+        new_sound = new_sound._spawn(
+            new_sound.raw_data,
+            overrides={"frame_rate": int(new_sound.frame_rate * (2.0 ** (pitch / 1200.0)))}
+        ).set_frame_rate(sound.frame_rate)
+
+        gain = random.uniform(-2, 2)
+        new_sound = new_sound.apply_gain(gain)
+
+        base_name = wav_file.stem
+
+        output_file = OUTPUT_DIR / f"{base_name}_var_{i}.wav"
+
+        new_sound.export(output_file, format="wav")
+
+        print("Saved:", output_file)
