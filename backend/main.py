@@ -1,8 +1,11 @@
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pathlib import Path
 from pydub import AudioSegment
 import random
+import shutil
+import uuid
 
 app = FastAPI()
 
@@ -13,7 +16,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+TEMP_DIR = Path("temp")
 OUTPUT_DIR = Path("output")
+TEMP_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 
@@ -29,6 +34,9 @@ def change_speed(sound, speed=1.0):
 async def generate(file: UploadFile = File(...), num: int = Form(...)):
     sound = AudioSegment.from_file(file.file)
     results = []
+
+    original_name = Path(file.filename).stem
+    session_id = uuid.uuid4().hex[:8]
 
     for i in range(num):
         new_sound = sound
@@ -49,9 +57,44 @@ async def generate(file: UploadFile = File(...), num: int = Form(...)):
         gain = random.uniform(-2, 2)
         new_sound = new_sound + gain
 
-        output = OUTPUT_DIR / f"variation_{i+1}.wav"
+        filename = f"{original_name}_{session_id}_variation_{i+1}.wav"
+        output = TEMP_DIR / filename
         new_sound.export(output, format="wav")
 
-        results.append(str(output))
+        results.append({
+            "filename": filename,
+            "preview_url": f"http://127.0.0.1:8000/preview/{filename}"
+        })
 
     return {"files": results}
+
+
+@app.get("/preview/{filename}")
+def preview_file(filename: str):
+    file_path = TEMP_DIR / filename
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="파일을 찾을 수 없습니다.")
+    return FileResponse(file_path, media_type="audio/wav", filename=filename)
+
+
+@app.post("/save/{filename}")
+def save_file(filename: str):
+    temp_path = TEMP_DIR / filename
+    if not temp_path.exists():
+        raise HTTPException(status_code=404, detail="임시 파일을 찾을 수 없습니다.")
+
+    output_path = OUTPUT_DIR / filename
+    shutil.copy(temp_path, output_path)
+
+    return {
+        "message": "저장 완료",
+        "saved_file": str(output_path)
+    }
+
+
+@app.get("/download/{filename}")
+def download_file(filename: str):
+    file_path = TEMP_DIR / filename
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="파일을 찾을 수 없습니다.")
+    return FileResponse(file_path, media_type="audio/wav", filename=filename)
