@@ -1,11 +1,189 @@
 import "./App.css";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import WaveSurfer from "wavesurfer.js";
+
+const API_BASE = "http://127.0.0.1:8000";
+
+function WaveformPlayer({ audioUrl }) {
+  const waveformRef = useRef(null);
+  const wavesurferRef = useRef(null);
+  const [isReady, setIsReady] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
+
+  useEffect(() => {
+    if (!waveformRef.current) return;
+
+    const ws = WaveSurfer.create({
+      container: waveformRef.current,
+      waveColor: "#7c8aa5",
+      progressColor: "#4f7cff",
+      cursorColor: "#222",
+      barWidth: 2,
+      barGap: 1,
+      barRadius: 2,
+      height: 80,
+      responsive: true,
+      normalize: true,
+    });
+
+    wavesurferRef.current = ws;
+    ws.load(audioUrl);
+
+    ws.on("ready", () => {
+      setIsReady(true);
+    });
+
+    ws.on("play", () => {
+      setIsPlaying(true);
+    });
+
+    ws.on("pause", () => {
+      setIsPlaying(false);
+    });
+
+    ws.on("finish", () => {
+      setIsPlaying(false);
+    });
+
+    return () => {
+      ws.destroy();
+    };
+  }, [audioUrl]);
+
+  const handleTogglePlay = () => {
+    if (!wavesurferRef.current || !isReady) return;
+    wavesurferRef.current.playPause();
+  };
+
+  return (
+    <div className="waveform-player">
+      <div className="waveform" ref={waveformRef}></div>
+      <button onClick={handleTogglePlay} disabled={!isReady}>
+        {isPlaying ? "Pause" : "Play"}
+      </button>
+    </div>
+  );
+}
+
+function AudioItem({
+  file,
+  index,
+  layerOptions,
+  onSave,
+  onApplyLayer,
+}) {
+  const categoryKeys = Object.keys(layerOptions || {});
+  const defaultCategory = categoryKeys[0] || "";
+  const [category, setCategory] = useState(defaultCategory);
+  const [subType, setSubType] = useState(
+    defaultCategory && layerOptions[defaultCategory]?.length > 0
+      ? layerOptions[defaultCategory][0]
+      : ""
+  );
+  const [isLayering, setIsLayering] = useState(false);
+
+  useEffect(() => {
+    if (!category) return;
+
+    const subTypes = layerOptions[category] || [];
+    if (subTypes.length > 0) {
+      setSubType(subTypes[0]);
+    } else {
+      setSubType("");
+    }
+  }, [category, layerOptions]);
+
+  const handleLayer = async () => {
+    if (!category || !subType) {
+      alert("레이어 카테고리와 타입을 선택해줘.");
+      return;
+    }
+
+    setIsLayering(true);
+    try {
+      await onApplyLayer(file.filename, category, subType);
+    } finally {
+      setIsLayering(false);
+    }
+  };
+
+  return (
+    <div className="audio-item">
+      <div className="audio-header">
+        <strong>
+          {file.type === "layered" ? "Layered Result" : `Variation ${index + 1}`}
+        </strong>
+        <span>{file.filename}</span>
+      </div>
+
+      <WaveformPlayer audioUrl={file.preview_url} />
+
+      <div className="audio-actions">
+        <button onClick={() => onSave(file.filename)}>Save</button>
+        <a href={`${API_BASE}/download/${file.filename}`} download>
+          <button>Download</button>
+        </a>
+      </div>
+
+      <div className="layer-panel">
+        <h4>Layer Options</h4>
+
+        <div className="layer-row">
+          <label>Category</label>
+          <select
+            value={category}
+            onChange={(e) => setCategory(e.target.value)}
+          >
+            {categoryKeys.map((key) => (
+              <option key={key} value={key}>
+                {key}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="layer-row">
+          <label>Type</label>
+          <select
+            value={subType}
+            onChange={(e) => setSubType(e.target.value)}
+          >
+            {(layerOptions[category] || []).map((type) => (
+              <option key={type} value={type}>
+                {type}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <button onClick={handleLayer} disabled={isLayering}>
+          {isLayering ? "Layering..." : "Apply Layer"}
+        </button>
+      </div>
+    </div>
+  );
+}
 
 function App() {
   const [count, setCount] = useState(10);
   const [message, setMessage] = useState("");
   const [selectedFile, setSelectedFile] = useState(null);
   const [files, setFiles] = useState([]);
+  const [layerOptions, setLayerOptions] = useState({});
+
+  useEffect(() => {
+    fetchLayerOptions();
+  }, []);
+
+  const fetchLayerOptions = async () => {
+    try {
+      const response = await fetch(`${API_BASE}/layer-options`);
+      const data = await response.json();
+      setLayerOptions(data.options || {});
+    } catch (error) {
+      console.error("레이어 옵션 불러오기 실패:", error);
+    }
+  };
 
   const handleGenerate = async () => {
     if (!selectedFile) {
@@ -21,7 +199,7 @@ function App() {
       formData.append("file", selectedFile);
       formData.append("num", count);
 
-      const response = await fetch("http://127.0.0.1:8000/generate", {
+      const response = await fetch(`${API_BASE}/generate`, {
         method: "POST",
         body: formData,
       });
@@ -41,7 +219,7 @@ function App() {
 
   const handleSave = async (filename) => {
     try {
-      const response = await fetch(`http://127.0.0.1:8000/save/${filename}`, {
+      const response = await fetch(`${API_BASE}/save/${filename}`, {
         method: "POST",
       });
 
@@ -57,10 +235,40 @@ function App() {
     }
   };
 
+  const handleApplyLayer = async (filename, category, subType) => {
+    try {
+      const formData = new FormData();
+      formData.append("filename", filename);
+      formData.append("category", category);
+      formData.append("sub_type", subType);
+      formData.append("layer_gain", -8);
+      formData.append("position_ms", 0);
+
+      const response = await fetch(`${API_BASE}/apply-layer`, {
+        method: "POST",
+        body: formData,
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.detail || "레이어 적용 실패");
+      }
+
+      setFiles((prev) => [data, ...prev]);
+      setMessage(`레이어 적용 완료: ${category} / ${subType}`);
+    } catch (error) {
+      alert(`레이어 에러: ${error.message}`);
+    }
+  };
+
   return (
     <div className="app">
       <h1>Sound AI Tool</h1>
-      <p>생성 후 미리 들어보고 마음에 드는 variation만 저장하세요.</p>
+      <p>
+        생성 후 미리 들어보고 마음에 드는 variation만 저장하세요.
+        이제 파형 확인과 레이어 합성도 가능합니다.
+      </p>
 
       <div className="card">
         <label>WAV 파일 선택</label>
@@ -87,24 +295,14 @@ function App() {
         <div className="list">
           <h2>Preview Variations</h2>
           {files.map((file, index) => (
-            <div className="audio-item" key={file.filename}>
-              <div className="audio-header">
-                <strong>Variation {index + 1}</strong>
-                <span>{file.filename}</span>
-              </div>
-
-              <audio controls src={file.preview_url}></audio>
-
-              <div className="audio-actions">
-                <button onClick={() => handleSave(file.filename)}>Save</button>
-                <a
-                  href={`http://127.0.0.1:8000/download/${file.filename}`}
-                  download
-                >
-                  <button>Download</button>
-                </a>
-              </div>
-            </div>
+            <AudioItem
+              key={file.filename}
+              file={file}
+              index={index}
+              layerOptions={layerOptions}
+              onSave={handleSave}
+              onApplyLayer={handleApplyLayer}
+            />
           ))}
         </div>
       )}
