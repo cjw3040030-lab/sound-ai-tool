@@ -1,14 +1,5 @@
-Write-Host "Starting backend server..."
+$projectRoot = "D:\SoundTools\sound-ai-tool"
 
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "
-cd 'C:\Users\WD\Desktop\sound-ai-tool\backend';
-.\venv\Scripts\Activate.ps1;
-python -m uvicorn main:app --reload
-"
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "Set-Location '$projectRoot\backend'; .\venv\Scripts\Activate.ps1; python -m uvicorn main:app --reload"
 
-Write-Host "Starting frontend server..."
-
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "
-cd 'C:\Users\WD\Desktop\sound-ai-tool\frontend';
-npm run dev
-"
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "Set-Location '$projectRoot\frontend'; npm run dev"
