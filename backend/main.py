@@ -2,198 +2,278 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pathlib import Path
+from uuid import uuid4
 from pydub import AudioSegment
 import random
 import shutil
-import uuid
 
-app = FastAPI()
+app = FastAPI(title="Sound AI Tool API")
 
+# -----------------------------
+# CORS
+# -----------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# -----------------------------
+# Paths
+# -----------------------------
 BASE_DIR = Path(__file__).resolve().parent
 TEMP_DIR = BASE_DIR / "temp"
 OUTPUT_DIR = BASE_DIR / "output"
-LAYER_DIR = BASE_DIR / "assets" / "layers"
+SAVED_DIR = BASE_DIR / "saved"
+LAYER_DIR = BASE_DIR / "layers"
 
-TEMP_DIR.mkdir(exist_ok=True)
-OUTPUT_DIR.mkdir(exist_ok=True)
-LAYER_DIR.mkdir(parents=True, exist_ok=True)
+for folder in [TEMP_DIR, OUTPUT_DIR, SAVED_DIR, LAYER_DIR]:
+    folder.mkdir(parents=True, exist_ok=True)
+
+API_BASE = "http://127.0.0.1:8000"
 
 
-def change_speed(sound, speed=1.0):
-    sound_with_altered_frame_rate = sound._spawn(
+# -----------------------------
+# Utils
+# -----------------------------
+def audio_file_response(path: Path):
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="파일을 찾을 수 없습니다.")
+    return FileResponse(path, media_type="audio/wav", filename=path.name)
+
+
+def change_speed(sound: AudioSegment, speed: float = 1.0) -> AudioSegment:
+    altered = sound._spawn(
         sound.raw_data,
         overrides={"frame_rate": int(sound.frame_rate * speed)}
     )
-    return sound_with_altered_frame_rate.set_frame_rate(sound.frame_rate)
+    return altered.set_frame_rate(sound.frame_rate)
 
 
-def match_length(layer_sound: AudioSegment, target_length_ms: int) -> AudioSegment:
-    if len(layer_sound) == target_length_ms:
-        return layer_sound
-
-    if len(layer_sound) > target_length_ms:
-        return layer_sound[:target_length_ms]
-
-    repeated = layer_sound
-    while len(repeated) < target_length_ms:
-        repeated += layer_sound
-
-    return repeated[:target_length_ms]
+def make_preview_item(path: Path, file_type: str = "variation") -> dict:
+    return {
+        "filename": path.name,
+        "preview_url": f"{API_BASE}/preview/{path.name}",
+        "type": file_type,
+    }
 
 
-def list_layer_options():
-    result = {}
+def safe_load_audio(path: Path) -> AudioSegment:
+    try:
+        return AudioSegment.from_file(path)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"오디오 로드 실패: {str(e)}")
+
+
+def export_wav(audio: AudioSegment, path: Path):
+    try:
+        audio.export(path, format="wav")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"WAV 저장 실패: {str(e)}")
+
+
+def normalize_gain_range(value: float, min_v: float, max_v: float) -> float:
+    return max(min_v, min(max_v, value))
+
+
+def get_layer_candidates(category: str, sub_type: str) -> list[Path]:
+    target_dir = LAYER_DIR / category / sub_type
+    if not target_dir.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"레이어 경로가 없습니다: {category}/{sub_type}"
+        )
+
+    files = []
+    for ext in ("*.wav", "*.mp3", "*.ogg", "*.flac"):
+        files.extend(target_dir.glob(ext))
+
+    if not files:
+        raise HTTPException(
+            status_code=404,
+            detail=f"레이어 파일이 없습니다: {category}/{sub_type}"
+        )
+
+    return files
+
+
+def build_layer_options() -> dict:
+    options = {}
 
     if not LAYER_DIR.exists():
-        return result
+        return options
 
-    for category_dir in LAYER_DIR.iterdir():
-        if not category_dir.is_dir():
-            continue
-
+    for category_dir in sorted([p for p in LAYER_DIR.iterdir() if p.is_dir()]):
         sub_types = []
-        for sub_dir in category_dir.iterdir():
-            if sub_dir.is_dir():
-                wav_files = list(sub_dir.glob("*.wav"))
-                if wav_files:
-                    sub_types.append(sub_dir.name)
+        for sub_dir in sorted([p for p in category_dir.iterdir() if p.is_dir()]):
+            has_audio = any(
+                list(sub_dir.glob("*.wav")) +
+                list(sub_dir.glob("*.mp3")) +
+                list(sub_dir.glob("*.ogg")) +
+                list(sub_dir.glob("*.flac"))
+            )
+            if has_audio:
+                sub_types.append(sub_dir.name)
 
         if sub_types:
-            result[category_dir.name] = sub_types
+            options[category_dir.name] = sub_types
 
-    return result
-
-
-def get_random_layer_file(category: str, sub_type: str):
-    target_dir = LAYER_DIR / category / sub_type
-    if not target_dir.exists() or not target_dir.is_dir():
-        return None
-
-    wav_files = list(target_dir.glob("*.wav"))
-    if not wav_files:
-        return None
-
-    return random.choice(wav_files)
+    return options
 
 
-@app.get("/layer-options")
-def get_layer_options():
-    return {"options": list_layer_options()}
+# -----------------------------
+# Health check
+# -----------------------------
+@app.get("/")
+def root():
+    return {"message": "Sound AI Tool backend is running"}
 
 
-@app.post("/generate")
-async def generate(file: UploadFile = File(...), num: int = Form(...)):
-    sound = AudioSegment.from_file(file.file)
-    results = []
-
-    original_name = Path(file.filename).stem
-    session_id = uuid.uuid4().hex[:8]
-
-    for i in range(num):
-        new_sound = sound
-
-        speed = random.uniform(0.97, 1.03)
-        new_sound = change_speed(new_sound, speed)
-
-        pitch = random.uniform(-30, 30)
-        new_sound = new_sound._spawn(
-            new_sound.raw_data,
-            overrides={
-                "frame_rate": int(
-                    new_sound.frame_rate * (2.0 ** (pitch / 1200.0))
-                )
-            },
-        ).set_frame_rate(sound.frame_rate)
-
-        gain = random.uniform(-2, 2)
-        new_sound = new_sound + gain
-
-        filename = f"{original_name}_{session_id}_variation_{i+1}.wav"
-        output = TEMP_DIR / filename
-        new_sound.export(output, format="wav")
-
-        results.append({
-            "filename": filename,
-            "preview_url": f"http://127.0.0.1:8000/preview/{filename}",
-            "type": "variation"
-        })
-
-    return {"files": results}
-
-
-@app.post("/apply-layer")
-async def apply_layer(
-    filename: str = Form(...),
-    category: str = Form(...),
-    sub_type: str = Form(...),
-    layer_gain: float = Form(-8.0),
-    position_ms: int = Form(0),
-):
-    base_path = TEMP_DIR / filename
-
-    if not base_path.exists():
-        raise HTTPException(status_code=404, detail="기본 파일을 찾을 수 없습니다.")
-
-    layer_file = get_random_layer_file(category, sub_type)
-    if not layer_file:
-        raise HTTPException(status_code=404, detail="레이어 소스를 찾을 수 없습니다.")
-
-    base_sound = AudioSegment.from_file(base_path)
-    layer_sound = AudioSegment.from_file(layer_file)
-
-    layer_sound = match_length(layer_sound, len(base_sound))
-    layer_sound = layer_sound + layer_gain
-
-    mixed = base_sound.overlay(layer_sound, position=position_ms)
-
-    new_filename = (
-        f"{Path(filename).stem}_layered_{category}_{sub_type}_{uuid.uuid4().hex[:6]}.wav"
-    )
-    output_path = TEMP_DIR / new_filename
-    mixed.export(output_path, format="wav")
-
-    return {
-        "filename": new_filename,
-        "preview_url": f"http://127.0.0.1:8000/preview/{new_filename}",
-        "type": "layered",
-        "layer_category": category,
-        "layer_sub_type": sub_type,
-    }
-
-
+# -----------------------------
+# Preview / Download
+# -----------------------------
 @app.get("/preview/{filename}")
 def preview_file(filename: str):
-    file_path = TEMP_DIR / filename
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="파일을 찾을 수 없습니다.")
-    return FileResponse(file_path, media_type="audio/wav", filename=filename)
-
-
-@app.post("/save/{filename}")
-def save_file(filename: str):
-    temp_path = TEMP_DIR / filename
-    if not temp_path.exists():
-        raise HTTPException(status_code=404, detail="임시 파일을 찾을 수 없습니다.")
-
-    output_path = OUTPUT_DIR / filename
-    shutil.copy(temp_path, output_path)
-
-    return {
-        "message": "저장 완료",
-        "saved_file": str(output_path)
-    }
+    path = OUTPUT_DIR / filename
+    return audio_file_response(path)
 
 
 @app.get("/download/{filename}")
 def download_file(filename: str):
-    file_path = TEMP_DIR / filename
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="파일을 찾을 수 없습니다.")
-    return FileResponse(file_path, media_type="audio/wav", filename=filename)
+    path = OUTPUT_DIR / filename
+    return audio_file_response(path)
+
+
+# -----------------------------
+# Generate variations
+# -----------------------------
+@app.post("/generate")
+async def generate_variations(
+    file: UploadFile = File(...),
+    num: int = Form(10),
+):
+    if not file.filename.lower().endswith(".wav"):
+        raise HTTPException(status_code=400, detail="WAV 파일만 업로드 가능합니다.")
+
+    num = max(1, min(20, num))
+
+    temp_name = f"{uuid4().hex}_{file.filename}"
+    temp_path = TEMP_DIR / temp_name
+
+    with open(temp_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    source = safe_load_audio(temp_path)
+    generated_files = []
+
+    try:
+        for i in range(num):
+            new_sound = source
+
+            # speed
+            speed = random.uniform(0.97, 1.03)
+            new_sound = change_speed(new_sound, speed)
+
+            # pitch (cent)
+            pitch = random.uniform(-30, 30)
+            new_sound = new_sound._spawn(
+                new_sound.raw_data,
+                overrides={
+                    "frame_rate": int(
+                        new_sound.frame_rate * (2.0 ** (pitch / 1200.0))
+                    )
+                },
+            ).set_frame_rate(source.frame_rate)
+
+            # gain
+            gain = random.uniform(-2.0, 2.0)
+            new_sound = new_sound + gain
+
+            output_name = f"{Path(file.filename).stem}_var_{i+1}_{uuid4().hex[:8]}.wav"
+            output_path = OUTPUT_DIR / output_name
+            export_wav(new_sound, output_path)
+
+            generated_files.append(make_preview_item(output_path, "variation"))
+
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+    return {"files": generated_files}
+
+
+# -----------------------------
+# Save output to saved folder
+# -----------------------------
+@app.post("/save/{filename}")
+def save_file(filename: str):
+    src = OUTPUT_DIR / filename
+    if not src.exists():
+        raise HTTPException(status_code=404, detail="저장할 파일이 없습니다.")
+
+    dst = SAVED_DIR / filename
+    shutil.copy2(src, dst)
+
+    return {
+        "message": "저장 완료",
+        "filename": filename,
+        "saved_path": str(dst),
+    }
+
+
+# -----------------------------
+# Delete output file
+# -----------------------------
+@app.delete("/delete/{filename}")
+def delete_file(filename: str):
+    target = OUTPUT_DIR / filename
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="삭제할 파일이 없습니다.")
+
+    target.unlink()
+    return {"message": "삭제 완료", "filename": filename}
+
+
+# -----------------------------
+# Layer options
+# -----------------------------
+@app.get("/layer-options")
+def get_layer_options():
+    return {"options": build_layer_options()}
+
+
+# -----------------------------
+# Apply layer
+# -----------------------------
+@app.post("/apply-layer")
+def apply_layer(
+    filename: str = Form(...),
+    category: str = Form(...),
+    sub_type: str = Form(...),
+    layer_gain: float = Form(-8),
+    position_ms: int = Form(0),
+):
+    base_path = OUTPUT_DIR / filename
+    if not base_path.exists():
+        raise HTTPException(status_code=404, detail="원본 파일을 찾을 수 없습니다.")
+
+    position_ms = max(0, position_ms)
+    layer_gain = normalize_gain_range(layer_gain, -60, 12)
+
+    base_audio = safe_load_audio(base_path)
+
+    candidates = get_layer_candidates(category, sub_type)
+    layer_path = random.choice(candidates)
+    layer_audio = safe_load_audio(layer_path)
+
+    layer_audio = layer_audio + layer_gain
+
+    mixed = base_audio.overlay(layer_audio, position=position_ms)
+
+    output_name = f"{Path(filename).stem}_layered_{category}_{sub_type}_{uuid4().hex[:8]}.wav"
+    output_path = OUTPUT_DIR / output_name
+    export_wav(mixed, output_path)
+
+    return make_preview_item(output_path, "layered")

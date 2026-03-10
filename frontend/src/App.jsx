@@ -4,7 +4,7 @@ import WaveSurfer from "wavesurfer.js";
 
 const API_BASE = "http://127.0.0.1:8000";
 
-function WaveformPlayer({ audioUrl }) {
+function WaveformPlayer({ audioUrl, isActive, onPlayRequest }) {
   const waveformRef = useRef(null);
   const wavesurferRef = useRef(null);
   const [isReady, setIsReady] = useState(false);
@@ -27,6 +27,9 @@ function WaveformPlayer({ audioUrl }) {
     });
 
     wavesurferRef.current = ws;
+    setIsReady(false);
+    setIsPlaying(false);
+
     ws.load(audioUrl);
 
     ws.on("ready", () => {
@@ -50,8 +53,19 @@ function WaveformPlayer({ audioUrl }) {
     };
   }, [audioUrl]);
 
+  useEffect(() => {
+    if (!isActive && wavesurferRef.current?.isPlaying()) {
+      wavesurferRef.current.pause();
+    }
+  }, [isActive]);
+
   const handleTogglePlay = () => {
     if (!wavesurferRef.current || !isReady) return;
+
+    if (!isPlaying && onPlayRequest) {
+      onPlayRequest();
+    }
+
     wavesurferRef.current.playPause();
   };
 
@@ -59,7 +73,7 @@ function WaveformPlayer({ audioUrl }) {
     <div className="waveform-player">
       <div className="waveform" ref={waveformRef}></div>
       <button onClick={handleTogglePlay} disabled={!isReady}>
-        {isPlaying ? "Pause" : "Play"}
+        {!isReady ? "Loading..." : isPlaying ? "Pause" : "Play"}
       </button>
     </div>
   );
@@ -71,16 +85,23 @@ function AudioItem({
   layerOptions,
   onSave,
   onApplyLayer,
+  onDelete,
+  isActive,
+  onPlayRequest,
+  isSaving,
+  isLayering,
 }) {
   const categoryKeys = Object.keys(layerOptions || {});
   const defaultCategory = categoryKeys[0] || "";
+
   const [category, setCategory] = useState(defaultCategory);
   const [subType, setSubType] = useState(
     defaultCategory && layerOptions[defaultCategory]?.length > 0
       ? layerOptions[defaultCategory][0]
       : ""
   );
-  const [isLayering, setIsLayering] = useState(false);
+  const [layerGain, setLayerGain] = useState(-8);
+  const [positionMs, setPositionMs] = useState(0);
 
   useEffect(() => {
     if (!category) return;
@@ -99,27 +120,35 @@ function AudioItem({
       return;
     }
 
-    setIsLayering(true);
-    try {
-      await onApplyLayer(file.filename, category, subType);
-    } finally {
-      setIsLayering(false);
-    }
+    await onApplyLayer(file.filename, category, subType, layerGain, positionMs);
   };
 
   return (
     <div className="audio-item">
       <div className="audio-header">
-        <strong>
-          {file.type === "layered" ? "Layered Result" : `Variation ${index + 1}`}
-        </strong>
-        <span>{file.filename}</span>
+        <div className="audio-title-wrap">
+          <strong>
+            {file.type === "layered" ? "Layered Result" : `Variation ${index + 1}`}
+          </strong>
+          <span>{file.filename}</span>
+        </div>
+
+        <button className="delete-btn" onClick={() => onDelete(file.filename)}>
+          Delete
+        </button>
       </div>
 
-      <WaveformPlayer audioUrl={file.preview_url} />
+      <WaveformPlayer
+        audioUrl={file.preview_url}
+        isActive={isActive}
+        onPlayRequest={onPlayRequest}
+      />
 
       <div className="audio-actions">
-        <button onClick={() => onSave(file.filename)}>Save</button>
+        <button onClick={() => onSave(file.filename)} disabled={isSaving}>
+          {isSaving ? "Saving..." : "Save"}
+        </button>
+
         <a href={`${API_BASE}/download/${file.filename}`} download>
           <button>Download</button>
         </a>
@@ -156,6 +185,25 @@ function AudioItem({
           </select>
         </div>
 
+        <div className="layer-row">
+          <label>Layer Gain (dB)</label>
+          <input
+            type="number"
+            value={layerGain}
+            onChange={(e) => setLayerGain(Number(e.target.value))}
+          />
+        </div>
+
+        <div className="layer-row">
+          <label>Position (ms)</label>
+          <input
+            type="number"
+            min="0"
+            value={positionMs}
+            onChange={(e) => setPositionMs(Number(e.target.value))}
+          />
+        </div>
+
         <button onClick={handleLayer} disabled={isLayering}>
           {isLayering ? "Layering..." : "Apply Layer"}
         </button>
@@ -170,6 +218,11 @@ function App() {
   const [selectedFile, setSelectedFile] = useState(null);
   const [files, setFiles] = useState([]);
   const [layerOptions, setLayerOptions] = useState({});
+
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [savingMap, setSavingMap] = useState({});
+  const [layeringMap, setLayeringMap] = useState({});
+  const [activePlayer, setActivePlayer] = useState(null);
 
   useEffect(() => {
     fetchLayerOptions();
@@ -191,8 +244,10 @@ function App() {
       return;
     }
 
+    setIsGenerating(true);
     setMessage("생성 중...");
     setFiles([]);
+    setActivePlayer(null);
 
     try {
       const formData = new FormData();
@@ -210,14 +265,18 @@ function App() {
         throw new Error(data.detail ? JSON.stringify(data.detail) : "생성 실패");
       }
 
-      setFiles(data.files);
+      setFiles(data.files || []);
       setMessage(`생성 완료: ${data.files.length}개`);
     } catch (error) {
       setMessage(`에러 발생: ${error.message}`);
+    } finally {
+      setIsGenerating(false);
     }
   };
 
   const handleSave = async (filename) => {
+    setSavingMap((prev) => ({ ...prev, [filename]: true }));
+
     try {
       const response = await fetch(`${API_BASE}/save/${filename}`, {
         method: "POST",
@@ -232,17 +291,27 @@ function App() {
       alert(`${filename} 저장 완료`);
     } catch (error) {
       alert(`저장 에러: ${error.message}`);
+    } finally {
+      setSavingMap((prev) => ({ ...prev, [filename]: false }));
     }
   };
 
-  const handleApplyLayer = async (filename, category, subType) => {
+  const handleApplyLayer = async (
+    filename,
+    category,
+    subType,
+    layerGain,
+    positionMs
+  ) => {
+    setLayeringMap((prev) => ({ ...prev, [filename]: true }));
+
     try {
       const formData = new FormData();
       formData.append("filename", filename);
       formData.append("category", category);
       formData.append("sub_type", subType);
-      formData.append("layer_gain", -8);
-      formData.append("position_ms", 0);
+      formData.append("layer_gain", layerGain);
+      formData.append("position_ms", positionMs);
 
       const response = await fetch(`${API_BASE}/apply-layer`, {
         method: "POST",
@@ -256,9 +325,38 @@ function App() {
       }
 
       setFiles((prev) => [data, ...prev]);
-      setMessage(`레이어 적용 완료: ${category} / ${subType}`);
+      setMessage(
+        `레이어 적용 완료: ${category} / ${subType} / gain ${layerGain}dB / ${positionMs}ms`
+      );
     } catch (error) {
       alert(`레이어 에러: ${error.message}`);
+    } finally {
+      setLayeringMap((prev) => ({ ...prev, [filename]: false }));
+    }
+  };
+
+  const handleDelete = async (filename) => {
+    const ok = window.confirm(`${filename} 을(를) 정말 삭제할까?`);
+    if (!ok) return;
+
+    try {
+      const response = await fetch(`${API_BASE}/delete/${filename}`, {
+        method: "DELETE",
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.detail || "삭제 실패");
+      }
+
+      setFiles((prev) => prev.filter((file) => file.filename !== filename));
+
+      if (activePlayer === filename) {
+        setActivePlayer(null);
+      }
+    } catch (error) {
+      alert(`삭제 에러: ${error.message}`);
     }
   };
 
@@ -278,22 +376,30 @@ function App() {
           onChange={(e) => setSelectedFile(e.target.files[0])}
         />
 
+        <div className="selected-file">
+          선택한 파일: {selectedFile ? selectedFile.name : "없음"}
+        </div>
+
         <label>생성 개수</label>
         <input
           type="number"
           min="1"
           max="20"
           value={count}
-          onChange={(e) => setCount(e.target.value)}
+          onChange={(e) => setCount(Number(e.target.value))}
         />
 
-        <button onClick={handleGenerate}>Generate</button>
+        <button onClick={handleGenerate} disabled={isGenerating}>
+          {isGenerating ? "Generating..." : "Generate"}
+        </button>
+
         <div className="result">{message}</div>
       </div>
 
       {files.length > 0 && (
         <div className="list">
           <h2>Preview Variations</h2>
+
           {files.map((file, index) => (
             <AudioItem
               key={file.filename}
@@ -302,6 +408,11 @@ function App() {
               layerOptions={layerOptions}
               onSave={handleSave}
               onApplyLayer={handleApplyLayer}
+              onDelete={handleDelete}
+              isActive={activePlayer === file.filename}
+              onPlayRequest={() => setActivePlayer(file.filename)}
+              isSaving={!!savingMap[file.filename]}
+              isLayering={!!layeringMap[file.filename]}
             />
           ))}
         </div>
