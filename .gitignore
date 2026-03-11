@@ -2,3 +2,14 @@
 __pycache__/
 output/
 .DS_Store
+# Python
+backend/venv/
+__pycache__/
+*.pyc
+
+# Node
+frontend/node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
