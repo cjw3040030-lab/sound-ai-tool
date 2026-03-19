@@ -1,0 +1,20 @@
+[
+  {
+    "action": "generate",
+    "source_file": "Boss_BossVator_Attack1_1.wav",
+    "count": 10,
+    "timestamp": 1773882999,
+    "files": [
+      "variation_1_1773882999769_2557.wav",
+      "variation_2_1773882999791_1157.wav",
+      "variation_3_1773882999795_8559.wav",
+      "variation_4_1773882999799_8314.wav",
+      "variation_5_1773882999802_8497.wav",
+      "variation_6_1773882999806_2310.wav",
+      "variation_7_1773882999810_5272.wav",
+      "variation_8_1773882999813_1331.wav",
+      "variation_9_1773882999816_7553.wav",
+      "variation_10_1773882999820_2904.wav"
+    ]
+  }
+]
